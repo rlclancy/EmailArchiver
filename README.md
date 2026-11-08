@@ -11,16 +11,45 @@ See [docs/DesignDoc_EmailArchiver.txt](docs/DesignDoc_EmailArchiver.txt) for the
 ```
 docs/                 design documents
 src/email_archiver/   application package
-tests/                tests
+tests/                tests (no network needed)
+config.example.toml   sample non-secret settings
 ```
 
-## Development
+## Setup
 
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-email-archiver
+```
+
+Phase 1 uses only the Python standard library (Python 3.11+).
+
+## Phase 1: read-only preview
+
+```sh
+# See which folders exist and which would be searched
+email-archiver preview --user you@cox.net --list-folders
+
+# Count matching messages by year and folder
+email-archiver preview --user you@cox.net --sender person@example.com --sender alt@example.org
+
+# Limit to a date range (inclusive, by each message's Date header)
+email-archiver preview --user you@cox.net --sender person@example.com --start 2023-01-01 --end 2023-12-31
+```
+
+You will be prompted for a Yahoo **app password** (hidden input). To create one, sign in at
+login.yahoo.com with your cox.net address -> Account Security -> Generate app password.
+
+Optional settings can go in `~/.config/email-archiver/config.toml`; see `config.example.toml`.
+
+The preview never changes the mailbox: every command passes through a read-only guard
+(`safe_imap.py`) that permits only EXAMINE, LIST, UID SEARCH and peek-only UID FETCH.
+
+## Tests
+
+```sh
+PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
 ## Privacy

@@ -1,0 +1,18 @@
+# Copy to ~/.config/email-archiver/config.toml (or pass --config).
+# Non-secret settings only. The app password is always prompted for
+# and must never be written here.
+
+[imap]
+host = "imap.mail.yahoo.com"   # Cox mail is hosted by Yahoo
+port = 993
+username = "you@cox.net"
+timeout = 60
+
+[search]
+senders = ["person@example.com", "person.alt@example.org"]
+# folders = ["Inbox", "Archive"]     # optional: search only these
+exclude_folders = []                  # extra folders to skip (Spam/Trash are always skipped)
+
+[limits]
+max_messages_per_pdf = 1500
+max_mb_per_pdf = 200

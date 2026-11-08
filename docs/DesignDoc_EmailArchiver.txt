@@ -69,7 +69,7 @@ Components
 
 ● Message retrieval: Use IMAP UID-based searches and fetches. Open every mailbox with EXAMINE (read-only), never SELECT. Fetch content only with BODY.PEEK[] (and header-only BODY.PEEK[HEADER.FIELDS (...)] in Phase 1); never use RFC822 or BODY[] fetches, which can set \Seen. Never issue STORE, COPY, MOVE, APPEND, or EXPUNGE.
 
-● Sender matching: Use server-side SEARCH FROM only as a coarse pre-filter; Yahoo treats it as a substring match on the From header. Accept a message only if the parsed From address (addr-spec, compared case-insensitively) exactly equals one of the configured sender addresses. The preview reports how many server hits were rejected by exact matching.
+● Sender matching: Use server-side SEARCH FROM only as a coarse pre-filter; Yahoo treats it as a substring match on the From header. Accept a message only if the parsed From address (addr-spec, compared case-insensitively) exactly equals one of the configured sender addresses. The preview reports how many server hits were rejected by exact matching. Apply any date range locally to the message's Date header; do not use server-side SINCE/BEFORE, which filter on INTERNALDATE and can differ from the Date header (for example on mail migrated from Cox to Yahoo).
 
 ● Duplicate handling: The same message can appear in more than one folder. Deduplicate by normalized Message-ID; when Message-ID is absent, use a SHA-256 hash of the raw message bytes (computed at fetch time; in Phase 1, use a provisional key of Date + From + Subject + RFC822.SIZE). Keep the first occurrence by folder order then UID, and record the other folders in that message's PDF header and in the manifest. Preview counts are reported after deduplication, with the number of duplicates shown separately.
 
