@@ -74,6 +74,7 @@ class SanitizeStats:
     inline_images: int = 0
     missing_inline: int = 0
     used_cids: set[str] = field(default_factory=set)
+    flattened: bool = False
 
 
 class InlineImages:
@@ -116,6 +117,8 @@ def sanitize_html(body: str, inline_parts: dict[str, tuple[str, bytes]],
             return None
         if tag == "a" and attr == "href":
             return v if v.lower().startswith(("http:", "https:", "mailto:")) else None
+        if attr == "style":
+            return strip_css_functions(value)
         return value
 
     clean = nh3.clean(
@@ -128,7 +131,123 @@ def sanitize_html(body: str, inline_parts: dict[str, tuple[str, bytes]],
         filter_style_properties=ALLOWED_STYLE_PROPERTIES,
         link_rel="noopener noreferrer",
     )
+    clean, stats.flattened = limit_depth(clean, MAX_NESTING)
     return clean, stats
+
+
+_CSS_FUNCTION = re.compile(r"\b(?:calc|var|env|min|max|clamp|attr|expression|url|image-set)\s*\(",
+                           re.IGNORECASE)
+
+
+def strip_css_functions(style: str) -> str:
+    """Drop declarations whose value uses CSS functions WeasyPrint may choke on
+    (e.g. a malformed ``calc(( + 80px)``). They only affect layout; colors in
+    rgb()/hsl() are kept."""
+    kept = [d for d in style.split(";") if d.strip() and not _CSS_FUNCTION.search(d)]
+    return ";".join(kept)
+
+
+MAX_NESTING = 60
+_VOID = {"br", "img", "hr", "col", "wbr"}
+
+
+def limit_depth(html: str, max_depth: int) -> tuple[str, bool]:
+    """Remove element tags nested deeper than ``max_depth``, keeping their text.
+
+    Long reply/forward chains can nest quotes 150+ levels deep, which exhausts
+    WeasyPrint's recursion. Input is nh3 output, so it is well-formed.
+    """
+    from html.parser import HTMLParser
+
+    class Flatten(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=False)
+            self.out: list[str] = []
+            self.stack: list[tuple[str, bool]] = []
+            self.flattened = False
+
+        def handle_starttag(self, tag, attrs):
+            keep = len([1 for _, k in self.stack if k]) < max_depth
+            if not keep:
+                self.flattened = True
+            if keep:
+                attr = "".join(f' {k}="{htmlmod.escape(v or "", quote=True)}"' for k, v in attrs)
+                self.out.append(f"<{tag}{attr}>")
+            if tag not in _VOID:
+                self.stack.append((tag, keep))
+
+        def handle_startendtag(self, tag, attrs):
+            if len([1 for _, k in self.stack if k]) < max_depth:
+                attr = "".join(f' {k}="{htmlmod.escape(v or "", quote=True)}"' for k, v in attrs)
+                self.out.append(f"<{tag}{attr}>")
+
+        def handle_endtag(self, tag):
+            if tag in _VOID:
+                return
+            while self.stack:
+                t, keep = self.stack.pop()
+                if keep:
+                    self.out.append(f"</{t}>")
+                if t == tag:
+                    break
+
+        def handle_data(self, data):
+            self.out.append(data)
+
+        def handle_entityref(self, name):
+            self.out.append(f"&{name};")
+
+        def handle_charref(self, name):
+            self.out.append(f"&#{name};")
+
+    # Fast path: shallow documents are returned untouched.
+    if html.count("<") < max_depth:
+        return html, False
+    f = Flatten()
+    f.feed(html)
+    f.close()
+    if not f.flattened:
+        return html, False
+    for t, keep in reversed(f.stack):
+        if keep:
+            f.out.append(f"</{t}>")
+    return "".join(f.out), True
+
+
+def html_to_text(html: str) -> str:
+    """Readable text from HTML (fallback when the HTML cannot be laid out)."""
+    from html.parser import HTMLParser
+
+    class Text(HTMLParser):
+        BLOCK = {"p", "div", "br", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+                 "blockquote", "table", "hr", "pre"}
+
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.parts: list[str] = []
+            self.skip = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style", "head", "title"):
+                self.skip += 1
+            elif tag in self.BLOCK:
+                self.parts.append("\n")
+
+        def handle_endtag(self, tag):
+            if tag in ("script", "style", "head", "title"):
+                self.skip = max(0, self.skip - 1)
+            elif tag in self.BLOCK:
+                self.parts.append("\n")
+
+        def handle_data(self, data):
+            if not self.skip:
+                self.parts.append(data)
+
+    t = Text()
+    t.feed(html)
+    t.close()
+    text = re.sub(r"[ \t\r\f\v]+", " ", "".join(t.parts))
+    return re.sub(r"\n\s*\n\s*\n+", "\n\n", text).strip()
 
 
 def text_to_html(text: str) -> str:
@@ -391,9 +510,16 @@ def _message_html(i: int, m: ParsedMessage, asm: _Assembly) -> tuple[str, Render
     e = htmlmod.escape
     sec = RenderedSection(m)
     notes = list(m.notes)
-    if m.body_kind == "html":
+    if m.body_kind == "html" and m.force_plain:
+        body, used = text_to_html(html_to_text(m.body)), set()
+        notes.append("This message's HTML could not be laid out in the PDF, so its text is "
+                     "shown without formatting. The original is kept in the .eml file.")
+    elif m.body_kind == "html":
         body, stats = sanitize_html(m.body, m.inline_parts, asm.images)
         sec.remote_images, sec.inline_images = stats.remote_images, stats.inline_images
+        if stats.flattened:
+            notes.append(f"Quoted replies were nested more than {MAX_NESTING} levels deep; "
+                         "the deepest levels are shown without extra indentation.")
         if stats.remote_images:
             notes.append(f"{stats.remote_images} remote image(s) were not loaded "
                          "(blocked for privacy; no network access while rendering).")
@@ -539,3 +665,65 @@ def write_render_report(output: Path, sections: list[RenderedSection]) -> Path:
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
     return path
+
+
+@dataclass
+class RenderIssues:
+    plain: list[ParsedMessage] = field(default_factory=list)      # rendered as plain text
+    excluded: list[tuple[ParsedMessage, str]] = field(default_factory=list)  # left out
+
+
+def _layout_error(messages: list[ParsedMessage]) -> BaseException | None:
+    """Lay out (without saving anything) and return the error, if any."""
+    import weasyprint
+
+    try:
+        doc, asm, _ = build_document(messages, "check", save_root=None)
+        weasyprint.HTML(string=doc, base_url=None, url_fetcher=OfflineFetcher(asm.images)).render()
+    except (Exception, RecursionError) as exc:
+        return exc
+    return None
+
+
+def _find_bad(messages: list[ParsedMessage]) -> list[tuple[ParsedMessage, BaseException]]:
+    """Binary search for the messages that make layout fail."""
+    err = _layout_error(messages)
+    if err is None:
+        return []
+    if len(messages) == 1:
+        return [(messages[0], err)]
+    mid = len(messages) // 2
+    return _find_bad(messages[:mid]) + _find_bad(messages[mid:])
+
+
+def render_pdf_resilient(messages: list[ParsedMessage], output: Path, title: str,
+                         verbose: bool = False, progress=lambda _m: None
+                         ) -> tuple[list[RenderedSection], RenderIssues]:
+    """render_pdf, but one bad message cannot sink the whole PDF.
+
+    On failure, find the offending messages, render them as plain text (with a
+    note) and retry; any that still fail are left out and reported.
+    """
+    issues = RenderIssues()
+    try:
+        return render_pdf(messages, output, title, verbose), issues
+    except (Exception, RecursionError) as first:
+        progress(f"    layout failed ({type(first).__name__}); finding the message(s) responsible ...")
+    current = list(messages)
+    for round_ in (1, 2):
+        bad = _find_bad(current)
+        if not bad:
+            break
+        for m, err in bad:
+            if round_ == 1 and m.body_kind == "html" and not m.force_plain:
+                m.force_plain = True
+                issues.plain.append(m)
+            else:
+                current.remove(m)
+                issues.excluded.append((m, f"could not be laid out ({type(err).__name__})"))
+                if m in issues.plain:
+                    issues.plain.remove(m)
+        progress(f"    {len(bad)} message(s) {'shown as plain text' if round_ == 1 else 'left out'}; retrying ...")
+    if not current:
+        raise RuntimeError("no message could be laid out")
+    return render_pdf(current, output, title, verbose), issues

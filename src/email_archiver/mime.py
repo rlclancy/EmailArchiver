@@ -45,6 +45,7 @@ class ParsedMessage:
     notes: list[str] = field(default_factory=list)
     folder: str | None = None
     uid: int | None = None
+    force_plain: bool = False  # set when the HTML body cannot be laid out; shown as text
 
     @property
     def year(self) -> int | None:

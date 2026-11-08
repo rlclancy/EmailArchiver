@@ -178,3 +178,53 @@ class RenderPdfTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RobustnessTests(unittest.TestCase):
+    """Regressions from the full export: one bad message must not sink a PDF."""
+
+    def test_css_functions_stripped(self):
+        from email_archiver.render import strip_css_functions
+        self.assertEqual(strip_css_functions("margin-left:calc(( + 80px);color:red"), "color:red")
+        self.assertEqual(strip_css_functions("color: rgb(1,2,3); width: var(--x)"), "color: rgb(1,2,3)")
+        out, _ = sanitize_html('<p style="margin-left:calc(( + 80px);color:red">x</p>', {}, InlineImages())
+        self.assertNotIn("calc", out)
+        self.assertIn("color:red", out.replace(" ", ""))
+
+    def test_deep_nesting_flattened_and_text_kept(self):
+        from email_archiver.render import MAX_NESTING, limit_depth
+        deep = "<blockquote>" * 200 + "deep text &amp; more" + "</blockquote>" * 200
+        out, flattened = limit_depth(deep, MAX_NESTING)
+        self.assertTrue(flattened)
+        self.assertEqual(out.count("<blockquote>"), MAX_NESTING)
+        self.assertEqual(out.count("</blockquote>"), MAX_NESTING)
+        self.assertIn("deep text &amp; more", out)
+        shallow = "<p>a</p>"
+        self.assertEqual(limit_depth(shallow, MAX_NESTING), (shallow, False))
+
+    def test_html_to_text(self):
+        from email_archiver.render import html_to_text
+        self.assertEqual(html_to_text("<p>Hola</p><style>x{}</style><div>mundo &amp; más</div>"),
+                         "Hola\n\nmundo & más")
+
+    def test_unrenderable_message_falls_back_to_plain_text(self):
+        from pypdf import PdfReader
+        from email_archiver import render as R
+        deep = "<blockquote>" * 400 + "<p>Very deep reply</p>" + "</blockquote>" * 400
+        bad = parse_eml(eml(subject="Deep", text="t", html=deep), "bad")
+        good = parse_eml(eml(subject="Fine", date="Wed, 4 Nov 2015 10:00:00 +0000", text="ok body"), "good")
+        old = R.MAX_NESTING
+        R.MAX_NESTING = 100000          # disable flattening to reproduce the real failure
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "x.pdf"
+                sections, issues = R.render_pdf_resilient([bad, good], out, "T")
+                self.assertEqual([m.source for m in issues.plain], ["bad"])
+                self.assertEqual(issues.excluded, [])
+                self.assertEqual(len(sections), 2)
+                text = " ".join(p.extract_text() for p in PdfReader(str(out)).pages)
+                self.assertIn("Very deep reply", text)
+                self.assertIn("could not be laid out", text)
+                self.assertIn("ok body", text)
+        finally:
+            R.MAX_NESTING = old

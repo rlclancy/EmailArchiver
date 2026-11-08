@@ -330,6 +330,7 @@ class PartResult:
     pages: int | None = None
     error: str | None = None
     excluded: list[tuple[MessageMeta, str]] = field(default_factory=list)
+    plain_text: list[MessageMeta] = field(default_factory=list)  # HTML shown as text (fallback)
 
 
 def _part_hash(part: Part, ckpt: Checkpoint, title: str) -> str:
@@ -340,11 +341,12 @@ def _part_hash(part: Part, ckpt: Checkpoint, title: str) -> str:
     return h.hexdigest()
 
 
-def render_part(part: Part, out: Path, ckpt: Checkpoint, title: str, force: bool = False) -> PartResult:
+def render_part(part: Part, out: Path, ckpt: Checkpoint, title: str, force: bool = False,
+                progress: Callable[[str], None] = lambda _m: None) -> PartResult:
     from pypdf import PdfReader
 
     from .mime import parse_eml
-    from .render import render_pdf
+    from .render import render_pdf_resilient
 
     ok = [m for m in part.messages if ckpt.messages.get(message_key(m), {}).get("status") == "ok"]
     excluded = [(m, "not fetched (see failures)") for m in part.messages if m not in ok]
@@ -358,9 +360,13 @@ def render_part(part: Part, out: Path, ckpt: Checkpoint, title: str, force: bool
     previous = ckpt.rendered.get(part.filename, {})
     if not force and pdf.is_file() and previous.get("hash") == digest:
         result.status, result.included, result.pages = "up-to-date", previous["included"], previous["pages"]
+        by_key = {message_key(m): m for m in part.messages}
+        result.excluded += [(by_key[k], why) for k, why in previous.get("excluded", []) if k in by_key]
+        result.plain_text = [by_key[k] for k in previous.get("plain_text", []) if k in by_key]
         return result
 
     parsed = []
+    meta_of: dict[int, MessageMeta] = {}
     for m in ok:
         entry = ckpt.messages[message_key(m)]
         try:
@@ -372,18 +378,23 @@ def render_part(part: Part, out: Path, ckpt: Checkpoint, title: str, force: bool
         if pm.date is None and m.internaldate is not None:
             pm.date = m.internaldate          # same fallback the search used for the year
         parsed.append(pm)
+        meta_of[id(pm)] = m
     try:
-        sections = render_pdf(parsed, pdf, title)
-    except Exception as exc:  # record and continue with other years (design section 8)
+        sections, issues = render_pdf_resilient(parsed, pdf, title, progress=progress)
+    except (Exception, RecursionError) as exc:  # record and continue with other years
         result.error = f"{exc.__class__.__name__}: {exc}"
         return result
-    if len(sections) != len(parsed):
-        result.error = f"rendered {len(sections)} of {len(parsed)} messages"
+    result.excluded += [(meta_of[id(pm)], why) for pm, why in issues.excluded]
+    result.plain_text = [meta_of[id(pm)] for pm in issues.plain]
+    if len(sections) != len(parsed) - len(issues.excluded):
+        result.error = f"rendered {len(sections)} of {len(parsed) - len(issues.excluded)} messages"
         return result
     result.status, result.included = "rendered", len(sections)
     result.pages = len(PdfReader(str(pdf)).pages)
     ckpt.rendered[part.filename] = {
         "hash": digest, "year": part.year, "included": result.included, "pages": result.pages,
+        "plain_text": [message_key(m) for m in result.plain_text],
+        "excluded": [[message_key(m), why] for m, why in result.excluded],
         "rendered_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "attachments": [
             {"message": f"{s.message.folder}|{s.message.uid}", "filename": a.filename,
@@ -463,7 +474,7 @@ def run_export(session: Session, messages: list[MessageMeta], parts: list[Part],
         for i, part in enumerate(parts, 1):
             title = part_title(part, start, end)
             progress(f"Rendering PDF {i}/{len(parts)}: {part.filename} ({len(part.messages)} messages) ...")
-            result.parts.append(render_part(part, out, ckpt, title))
+            result.parts.append(render_part(part, out, ckpt, title, progress=progress))
         result.finished = datetime.now(timezone.utc)
     finally:
         if manifest_info is not None:
@@ -477,6 +488,7 @@ def write_manifest(out: Path, result: ExportResult, ckpt: Checkpoint, info: dict
     pdf_of = {message_key(m): p.part.filename for p in result.parts for m in p.part.messages
               if p.status in ("rendered", "up-to-date")}
     failed = {message_key(m): why for m, why in result.not_exported}
+    plain = {message_key(m) for p in result.parts for m in p.plain_text}
     msgs = []
     for m in result.messages:
         k = message_key(m)
@@ -487,6 +499,7 @@ def write_manifest(out: Path, result: ExportResult, ckpt: Checkpoint, info: dict
             "size": e.get("size"), "pdf": None if k in failed else pdf_of.get(k),
             "status": "failed" if k in failed else ("exported" if k in pdf_of else "pending"),
             "problem": failed.get(k),
+            "shown_as_plain_text": k in plain,
         })
     years: dict[str, dict] = {}
     for m in result.messages:

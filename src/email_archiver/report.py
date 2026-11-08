@@ -267,6 +267,8 @@ def render_export_result(res, out, reconnects: int = 0) -> str:
                      f"{(p.pages if p.pages is not None else '-'):>7}")
         if p.error:
             lines.append(f"      ERROR: {p.error}")
+        for m in p.plain_text:
+            lines.append(f"      note: {m.folder}:{m.uid} shown as plain text (its HTML could not be laid out)")
     lines.append("")
     lines.append("Reconciliation")
     lines.append(f"  Found by the search:             {res.total:>6,}")

@@ -360,7 +360,7 @@ def cmd_sample(args: argparse.Namespace) -> int:
 
 def cmd_render(args: argparse.Namespace) -> int:
     from .mime import load_messages  # heavy imports only for this command
-    from .render import render_pdf, write_render_report
+    from .render import render_pdf_resilient, write_render_report
     from .report import render_render_result
 
     if args.output is None:
@@ -396,12 +396,18 @@ def cmd_render(args: argparse.Namespace) -> int:
         return 2
     _progress(f"Rendering {len(messages)} message(s) ...")
     try:
-        sections = render_pdf(messages, output, args.title, verbose=args.verbose)
+        sections, issues = render_pdf_resilient(messages, output, args.title,
+                                                verbose=args.verbose, progress=_progress)
     except OSError as exc:
         _err(f"Could not write the PDF: {exc.__class__.__name__}: {exc}")
         return 4
     report = write_render_report(output, sections)
+    errors = errors + [(m.source, why) for m, why in issues.excluded]
     print(render_render_result(sections, output, errors, report))
+    for m in issues.plain:
+        print(f"  note: {m.source} shown as plain text (its HTML could not be laid out)")
+    for f, why in issues.excluded:
+        _err(f"Left out of the PDF: {f.source}: {why}")
     return 1 if errors else 0
 
 
