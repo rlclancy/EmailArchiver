@@ -1,0 +1,30 @@
+# --- Secrets: never commit ---
+app_passwd.jpg
+*passw*
+*.secret
+.env
+.env.*
+
+# --- Archive output (contains private mail content) ---
+output/
+samples/
+messages/
+attachments/
+*.eml
+*.pdf
+export-manifest.json
+*.checkpoint
+*.log
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# --- macOS ---
+.DS_Store

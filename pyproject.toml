@@ -1,0 +1,16 @@
+[project]
+name = "email-archiver"
+version = "0.1.0"
+description = "Export all email from chosen senders in a Cox/Yahoo mailbox to local, searchable yearly PDFs."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+email-archiver = "email_archiver.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
