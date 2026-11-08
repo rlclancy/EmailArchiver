@@ -105,6 +105,20 @@ def build_parser() -> argparse.ArgumentParser:
     sm.add_argument("--list", action="store_true",
                     help="List every matching message with its FOLDER:UID and exit (fetches nothing)")
 
+    ex = sub.add_parser("export", help="Phase 5: export every match to one PDF per year (resumable).")
+    _add_common(ex)
+    ex.add_argument("--output-dir", type=Path, required=True,
+                    help="Archive folder (outside any git repo); re-run the same command to resume")
+    ex.add_argument("--year", type=int, help="Export only this year (a limited run)")
+    ex.add_argument("--split", choices=("never", "monthly"),
+                    help="For years over the size limit: keep one PDF, or split by calendar month "
+                         "(asked once if not given; the choice is remembered)")
+    ex.add_argument("--prefix", default="Cox-Sender-Archive",
+                    help="PDF file name prefix (default Cox-Sender-Archive)")
+    ex.add_argument("--no-manifest", action="store_true",
+                    help="Do not write export-manifest.json (it lists mailbox metadata, not content)")
+    ex.add_argument("--yes", action="store_true", help="Do not ask for confirmation")
+
     rd = sub.add_parser("render", help="Phase 3: render saved .eml files into one searchable PDF (offline).")
     rd.add_argument("paths", nargs="+", type=Path, metavar="PATH",
                     help="A sample folder from `sample`, or .eml files")
@@ -202,10 +216,14 @@ def _folders(conn, cfg, include):
         raise _Exit(2)
 
 
-def _with_mailbox(args: argparse.Namespace, need_senders: bool, body) -> int:
+def _with_mailbox(args: argparse.Namespace, need_senders: bool, body,
+                  want_reconnect: bool = False) -> int:
     """Resolve settings, connect, log in, pick folders, then run ``body``.
 
     ``body(conn, cfg, host, user, senders, selected, excluded)`` returns an exit code.
+    With ``want_reconnect``, body also gets ``reconnect()`` (a fresh logged-in
+    connection, for recovering from network drops); the password then stays in
+    memory for the run instead of being discarded after login.
     Handles network/TLS/safety errors uniformly and always logs out.
     """
     try:
@@ -219,12 +237,18 @@ def _with_mailbox(args: argparse.Namespace, need_senders: bool, body) -> int:
     try:
         _progress(f"Connecting to {host}:{port} over TLS ...")
         conn = connect(host, port, timeout=cfg.timeout)
-        try:
-            _login(conn, user, password, source)
-        finally:
-            del password
+        _login(conn, user, password, source)
         selected, excluded = _folders(conn, cfg, include)
-        return body(conn, cfg, host, user, senders, selected, excluded)
+        if not want_reconnect:
+            del password
+            return body(conn, cfg, host, user, senders, selected, excluded)
+
+        def reconnect():
+            new = connect(host, port, timeout=cfg.timeout)
+            new.login(user, password)
+            return new
+
+        return body(conn, cfg, host, user, senders, selected, excluded, reconnect)
     except _Exit as e:
         return e.code
     except ssl.SSLCertVerificationError as exc:
@@ -381,6 +405,109 @@ def cmd_render(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def _ask(question: str) -> bool:
+    try:
+        return input(question).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    import re as _re
+
+    from .export import (
+        CHECKPOINT_NAME, Checkpoint, ExportError, Session, _private_dir, check_output_dir,
+        plan_parts, run_export,
+    )
+    from .report import render_export_plan, render_export_result
+
+    if not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}", args.prefix):
+        _err("--prefix may contain only letters, digits, '.', '_' and '-'.")
+        return 2
+    if args.year is not None:
+        if args.start or args.end:
+            _err("Use either --year or --start/--end, not both.")
+            return 2
+        args.start, args.end = date(args.year, 1, 1), date(args.year, 12, 31)
+    try:
+        out = check_output_dir(args.output_dir)
+    except ExportError as exc:
+        _err(str(exc))
+        return 2
+    interactive = sys.stdin.isatty()
+    if not args.yes and not interactive:
+        _err("Add --yes to run without a terminal (the export asks for confirmation).")
+        return 2
+
+    def body(conn, cfg, host, user, senders, selected, excluded, reconnect):
+        result = _search(conn, cfg, senders, selected, excluded, args)
+        if not result.messages:
+            print("No matching messages found. Nothing to export; no files written.")
+            return 0
+        try:
+            ckpt = Checkpoint(out / CHECKPOINT_NAME,
+                              {"host": host, "user": user, "senders": sorted(senders)})
+        except ExportError as exc:
+            _err(str(exc))
+            return 2
+
+        oversized = {y for y, _ in result.oversized_years}
+        split = args.split or ckpt.data.get("split")
+        if oversized and split is None:
+            years = ", ".join(str(y) for y in sorted(oversized, key=lambda y: y or 0))
+            if not interactive:
+                _err(f"Year(s) {years} exceed the size limit. Re-run with --split monthly "
+                     "or --split never.")
+                return 2
+            split = "monthly" if _ask(
+                f"Year(s) {years} exceed the size limit ({cfg.max_messages_per_pdf} messages or "
+                f"{cfg.max_mb_per_pdf} MB). Split them into calendar-month parts? [y/N] ") else "never"
+        split = split or "never"
+        parts = plan_parts(result.messages, oversized if split == "monthly" else set(),
+                           cfg.max_messages_per_pdf, cfg.max_mb_per_pdf * 1024 * 1024, args.prefix)
+        print(render_export_plan(result, parts, out, ckpt, split), flush=True)
+        if not args.yes and not _ask("\nStart the export? [y/N] "):
+            print("Canceled. Nothing was written.")
+            return 0
+
+        _private_dir(out)
+        ckpt.data["split"] = split
+        ckpt.save()
+        session = Session(conn, reconnect, {f.name: f.raw for f in selected}, _progress)
+        info = None if args.no_manifest else {
+            "version": __version__, "phase": 5, "host": host, "senders": senders,
+            "folders_searched": [f.name for f in selected],
+            "folders_excluded": [[f.name, why] for f, why in excluded],
+            "date_range": {"start": args.start.isoformat() if args.start else None,
+                           "end": args.end.isoformat() if args.end else None},
+        }
+        try:
+            res = run_export(session, result.messages, parts, out, ckpt, start=args.start,
+                             end=args.end, manifest_info=info, progress=_progress)
+        except ExportError as exc:
+            _err(f"\nExport stopped: {exc}")
+            return 4
+        except KeyboardInterrupt:
+            _err("\nCanceled. Progress is saved; re-run the same command to resume. "
+                 "The mailbox is unchanged.")
+            return 130
+        except OSError as exc:
+            _err(f"\nExport stopped: {exc.__class__.__name__}: {exc}\n"
+                 "Completed files were kept and progress is saved; fix the problem and re-run.")
+            return 4
+        finally:
+            conn_now = session.conn
+            if conn_now is not conn:   # a reconnect replaced the original connection
+                try:
+                    conn_now.logout()
+                except Exception:
+                    pass
+        print(render_export_result(res, out, session.reconnects))
+        return 1 if res.not_exported else 0
+
+    return _with_mailbox(args, need_senders=True, body=body, want_reconnect=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -390,6 +517,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_sample(args)
         if args.command == "render":
             return cmd_render(args)
+        if args.command == "export":
+            return cmd_export(args)
     except KeyboardInterrupt:
         _err("\nCanceled. The mailbox is unchanged.")
         return 130

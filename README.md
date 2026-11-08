@@ -125,6 +125,39 @@ attachment's outcome and SHA-256, with no message content.
 Limits: PDFs over 100 pages and images over 60 megapixels are saved instead of embedded.
 Text over 200,000 characters is shown truncated, with the full file saved.
 
+## Phase 5: full export
+
+```sh
+# 1. A limited run first: one year, then compare with the preview
+email-archiver export --user you@cox.net --sender person@example.com --output-dir ~/EmailArchive --year 2015
+
+# 2. The full export (already-downloaded messages are reused, not fetched again)
+email-archiver export --user you@cox.net --sender person@example.com --output-dir ~/EmailArchive
+```
+
+It searches, shows the plan (PDFs, counts, sizes) and asks before starting (`--yes` skips the question).
+
+```
+~/EmailArchive/
+  Cox-Sender-Archive-2015.pdf      one per year (or -2016-part-01.pdf … when split by month)
+  messages/2015/*.eml              every original message, byte for byte
+  attachments/2015/*               attachments that cannot be shown in a PDF (linked from it)
+  export-manifest.json             identifiers, checksums, paths, counts; no subjects or bodies
+  export.checkpoint                resume state
+```
+
+- **Resumable.** Progress is saved after every message. If the run is interrupted (Ctrl-C, sleep,
+  network loss), run the same command again: verified downloads are reused and unchanged PDFs are
+  not rebuilt. Network drops are retried with a fresh login (waits of 2, 4, 8, 16 and 32 s).
+- **Nothing silently dropped.** The result reconciles the search count against the PDFs and lists
+  every message not exported with its reason (e.g. flags changed, folder renumbered by the server).
+  Re-running retries them.
+- **Large years.** Years over the limit (1,500 messages or 200 MB) are either kept whole or split
+  into calendar-month parts. You choose once (`--split monthly|never`, or answer the prompt) and the
+  choice is remembered.
+- The output folder must be outside any git repository, and holds one sender list per folder.
+- `--no-manifest` skips the manifest; `--prefix` changes the PDF names.
+
 ## Tests
 
 ```sh

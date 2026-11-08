@@ -226,3 +226,68 @@ def render_render_result(sections, output, errors, report=None) -> str:
     out.append("Rendered offline: no network access; HTML sanitized before rendering.")
     return "\n".join(out)
 
+
+# --------------------------------------------------------------------------
+# Phase 5
+# --------------------------------------------------------------------------
+
+def render_export_plan(result, parts, out, ckpt, split) -> str:
+    from .export import _reusable, message_key
+
+    total = len(result.messages)
+    size = sum(m.size for m in result.messages)
+    reused = sum(_reusable(ckpt.messages.get(message_key(m)), out) for m in result.messages)
+    lines = ["", "=" * 64, "EXPORT PLAN", "=" * 64]
+    lines.append(f"Output folder: {out}")
+    if result.start or result.end:
+        lines.append(f"Date range:    {result.start or 'beginning'} to {result.end or 'end'} (limited run)")
+    lines.append(f"Messages:      {total:,} ({human_size(size)}) into {len(parts)} PDF(s)")
+    if reused:
+        lines.append(f"Already downloaded by an earlier run: {reused:,} (verified by checksum; not fetched again)")
+    if result.oversized_years:
+        lines.append(f"Oversized years: {split} "
+                     f"({'split into calendar-month parts' if split == 'monthly' else 'kept as one PDF'})")
+    lines.append("")
+    for p in parts:
+        lines.append(f"  {p.filename:<40}{len(p.messages):>6} messages {human_size(p.size):>10}"
+                     + (f"   {p.label.split('(')[-1].rstrip(')')}" if p.index else ""))
+    lines.append("")
+    lines.append("Originals are kept as .eml under messages/YYYY/; attachments that cannot be")
+    lines.append("shown in a PDF go under attachments/YYYY/. The mailbox is only read, never changed.")
+    return "\n".join(lines)
+
+
+def render_export_result(res, out, reconnects: int = 0) -> str:
+    lines = ["", "=" * 64, "EXPORT RESULT", "=" * 64]
+    lines.append(f"Output folder: {out}")
+    lines.append("")
+    lines.append(f"  {'PDF':<40}{'STATUS':<12}{'MESSAGES':>9}{'PAGES':>7}")
+    for p in res.parts:
+        lines.append(f"  {p.part.filename:<40}{p.status:<12}{p.included:>9}"
+                     f"{(p.pages if p.pages is not None else '-'):>7}")
+        if p.error:
+            lines.append(f"      ERROR: {p.error}")
+    lines.append("")
+    lines.append("Reconciliation")
+    lines.append(f"  Found by the search:             {res.total:>6,}")
+    lines.append(f"  Exported into PDFs:              {res.exported:>6,}")
+    lines.append(f"  Not exported:                    {len(res.not_exported):>6,}")
+    lines.append(f"  Downloaded this run:             {res.fetch.fetched:>6,}")
+    lines.append(f"  Reused from an earlier run:      {res.fetch.reused:>6,}")
+    if reconnects:
+        lines.append(f"  Network reconnects:              {reconnects:>6,}")
+    if res.not_exported:
+        lines.append("")
+        lines.append("NOT EXPORTED — these messages are not in any PDF:")
+        for m, why in res.not_exported:
+            when = f"{m.effective_date:%Y-%m-%d}" if m.effective_date else "undated"
+            lines.append(f"  {m.folder}:{m.uid}  {when}  {_truncate(m.subject, 36)!r}")
+            lines.append(f"      reason: {why}")
+        lines.append("Re-run the same command to retry them; finished files are kept.")
+    if res.manifest:
+        lines.append("")
+        lines.append(f"Manifest: {res.manifest}")
+    lines.append("")
+    lines.append("Mailbox unchanged: folders opened read-only (EXAMINE), messages read with")
+    lines.append("BODY.PEEK, flags compared before and after every download.")
+    return "\n".join(lines)
