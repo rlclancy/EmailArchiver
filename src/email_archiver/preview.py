@@ -11,10 +11,10 @@ from .folders import Folder
 from .headers import MessageMeta, build_meta, parse_fetch_response
 from .safe_imap import imap_quote
 
-FETCH_ITEMS = (
-    "(UID RFC822.SIZE INTERNALDATE "
-    "BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT MESSAGE-ID)])"
-)
+# Fetch the whole header block, not HEADER.FIELDS: Yahoo rewrites the Date
+# field to UTC ("+0000 (UTC)") in HEADER.FIELDS responses, which would lose the
+# sender's timezone used to choose the year. BODY.PEEK[HEADER] is returned as sent.
+FETCH_ITEMS = "(UID RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER])"
 FETCH_BATCH = 100
 
 

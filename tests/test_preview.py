@@ -47,7 +47,7 @@ class FakeIMAP:
             for u in map(int, args[0].split(",")):
                 size, idate, h = msgs[u]
                 data.append(((f'{u} (UID {u} RFC822.SIZE {size} INTERNALDATE "{idate}" '
-                             f'BODY[HEADER.FIELDS (DATE FROM SUBJECT MESSAGE-ID)] {{{len(h)}}}').encode(), h))
+                             f'BODY[HEADER] {{{len(h)}}}').encode(), h))
                 data.append(b")")
             return "OK", data
         raise AssertionError(sub)
@@ -118,3 +118,13 @@ class PreviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FetchItemsRegressionTests(unittest.TestCase):
+    def test_fetches_full_header_not_header_fields(self):
+        # Yahoo rewrites Date to UTC in HEADER.FIELDS responses; the sender's
+        # timezone (which chooses the year) survives only in BODY.PEEK[HEADER].
+        from email_archiver.preview import FETCH_ITEMS
+        self.assertIn("BODY.PEEK[HEADER]", FETCH_ITEMS)
+        self.assertNotIn("HEADER.FIELDS", FETCH_ITEMS)
+        check_command("UID", ("FETCH", "1:5", FETCH_ITEMS))

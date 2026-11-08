@@ -67,7 +67,7 @@ Components
 
 ● Folder selection: Identify Spam and Trash by IMAP SPECIAL-USE attributes (\Junk, \Trash). If the server does not advertise them, fall back to case-insensitive name matching (Bulk, Bulk Mail, Spam, Junk, Trash, Deleted, Deleted Items). The preview lists every folder searched and every folder excluded, with the reason. A --folders flag overrides automatic selection.
 
-● Message retrieval: Use IMAP UID-based searches and fetches. Open every mailbox with EXAMINE (read-only), never SELECT. Fetch content only with BODY.PEEK[] (and header-only BODY.PEEK[HEADER.FIELDS (...)] in Phase 1); never use RFC822 or BODY[] fetches, which can set \Seen. Never issue STORE, COPY, MOVE, APPEND, or EXPUNGE.
+● Message retrieval: Use IMAP UID-based searches and fetches. Open every mailbox with EXAMINE (read-only), never SELECT. Fetch content only with BODY.PEEK[] (and the header-only BODY.PEEK[HEADER] in Phase 1; not HEADER.FIELDS, because Yahoo rewrites the Date field to UTC in HEADER.FIELDS responses, losing the sender's timezone); never use RFC822 or BODY[] fetches, which can set \Seen. Never issue STORE, COPY, MOVE, APPEND, or EXPUNGE.
 
 ● Sender matching: Use server-side SEARCH FROM only as a coarse pre-filter; Yahoo treats it as a substring match on the From header. Accept a message only if the parsed From address (addr-spec, compared case-insensitively) exactly equals one of the configured sender addresses. The preview reports how many server hits were rejected by exact matching. Apply any date range locally to the message's Date header; do not use server-side SINCE/BEFORE, which filter on INTERNALDATE and can differ from the Date header (for example on mail migrated from Cox to Yahoo).
 
@@ -187,7 +187,7 @@ Implement and deliver one phase at a time. Each phase must have a small, reviewa
 
 Phase 1 — Read-only mailbox preview
 
-Build: CLI setup, secure credential prompt (or environment variable), TLS IMAP connection, folder discovery, sender-address list input, folder exclusions (Spam and Trash), and a read-only search. Fetch only UIDs, RFC822.SIZE, INTERNALDATE, and the Date/From/Subject/Message-ID headers (via BODY.PEEK) needed to report match counts and sizes by folder and message year; do not fetch bodies or change mailbox state. Report searched and excluded folders, exact-match rejections, duplicates removed, and years over the size limit.
+Build: CLI setup, secure credential prompt (or environment variable), TLS IMAP connection, folder discovery, sender-address list input, folder exclusions (Spam and Trash), and a read-only search. Fetch only UIDs, RFC822.SIZE, INTERNALDATE, and the message header block (via BODY.PEEK[HEADER]; Date/From/Subject/Message-ID are read from it) needed to report match counts and sizes by folder and message year; do not fetch bodies or change mailbox state. Report searched and excluded folders, exact-match rejections, duplicates removed, and years over the size limit.
 
 User validates: The account connects; the selected folders are right; the address list and counts look correct, including boundary-year messages.
 
