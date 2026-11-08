@@ -41,8 +41,25 @@ email-archiver preview --user you@cox.net --sender person@example.com --sender a
 email-archiver preview --user you@cox.net --sender person@example.com --start 2023-01-01 --end 2023-12-31
 ```
 
-You will be prompted for a Yahoo **app password** (hidden input). To create one, sign in at
-login.yahoo.com with your cox.net address -> Account Security -> Generate app password.
+You need a Yahoo **app password**. To create one, sign in at login.yahoo.com with your
+cox.net address -> Account Security -> Generate app password.
+
+If `EMAIL_ARCHIVER_APP_PASSWORD` is set, the tool uses it; otherwise it prompts (hidden input).
+To set it from `~/.zshrc` without keeping the password in plain text, store it once in the
+macOS Keychain:
+
+```sh
+security add-generic-password -s email-archiver -a you@cox.net -w   # prompts for the password
+```
+
+then add to `~/.zshrc`:
+
+```sh
+export EMAIL_ARCHIVER_APP_PASSWORD="$(security find-generic-password -s email-archiver -a you@cox.net -w 2>/dev/null)"
+```
+
+(A plain `export EMAIL_ARCHIVER_APP_PASSWORD='...'` also works, but leaves the password readable
+in `~/.zshrc` and in any backups of it.)
 
 Optional settings can go in `~/.config/email-archiver/config.toml`; see `config.example.toml`.
 
@@ -58,6 +75,7 @@ python -m unittest discover -s tests
 
 ## Privacy
 
-- The app password is prompted for at runtime and never stored.
+- The tool never stores the app password. It reads it from `EMAIL_ARCHIVER_APP_PASSWORD` or a
+  hidden prompt, and never accepts it as a command-line argument or from the config file.
 - Archive output (`*.pdf`, `*.eml`, `attachments/`, `messages/`, manifests) is git-ignored
   because it contains private mail. Keep it outside this repo.

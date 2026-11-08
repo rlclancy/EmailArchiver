@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import imaplib
+import os
 import socket
 import ssl
 import sys
@@ -19,13 +20,22 @@ from .preview import run_preview
 from .report import render_folders, render_preview
 from .safe_imap import MailboxSafetyError, connect
 
+PASSWORD_ENV_VAR = "EMAIL_ARCHIVER_APP_PASSWORD"
+
 APP_PASSWORD_HELP = """\
 Login failed. Not retrying, to avoid locking the account.
 
 Cox addresses are now hosted by Yahoo Mail and usually need an app password:
   1. Sign in at https://login.yahoo.com with your full @cox.net address.
   2. Open Account Info -> Account Security -> Generate app password.
-  3. Run this tool again and paste that password at the prompt.
+  3. Run this tool again and paste that password at the prompt
+     (or set it in $EMAIL_ARCHIVER_APP_PASSWORD).
+"""
+
+ENV_PASSWORD_HELP = """\
+The password came from $EMAIL_ARCHIVER_APP_PASSWORD. Check that it holds the
+current Yahoo app password (not your regular password), or unset it to be
+prompted instead.
 """
 
 
@@ -67,6 +77,16 @@ def _prompt_senders() -> list[str]:
     return [s for s in (x.strip() for x in raw.split(",")) if s]
 
 
+def get_password(user: str, environ=None, prompt=getpass.getpass) -> tuple[str, str]:
+    """Return (password, source). Uses $EMAIL_ARCHIVER_APP_PASSWORD if set and
+    non-empty; otherwise prompts with no echo. source is "env" or "prompt"."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(PASSWORD_ENV_VAR, "").strip()
+    if value:
+        return value, "env"
+    return prompt(f"App password for {user} (input hidden): "), "prompt"
+
+
 def cmd_preview(args: argparse.Namespace) -> int:
     try:
         cfg = load_config(args.config, required=args.config is not None)
@@ -97,10 +117,12 @@ def cmd_preview(args: argparse.Namespace) -> int:
     include = ([f.strip() for f in args.folders.split(",") if f.strip()]
                if args.folders else cfg.folders)
 
-    password = getpass.getpass(f"App password for {user} (input hidden): ")
+    password, pw_source = get_password(user)
     if not password:
         _err("No password entered.")
         return 2
+    if pw_source == "env":
+        print(f"Using app password from ${PASSWORD_ENV_VAR}.", file=sys.stderr)
 
     conn = None
     try:
@@ -110,6 +132,8 @@ def cmd_preview(args: argparse.Namespace) -> int:
             conn.login(user, password)
         except imaplib.IMAP4.error:
             _err(APP_PASSWORD_HELP)
+            if pw_source == "env":
+                _err(ENV_PASSWORD_HELP)
             return 3
         finally:
             del password

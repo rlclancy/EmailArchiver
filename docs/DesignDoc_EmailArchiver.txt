@@ -47,7 +47,7 @@ The user is on macOS. Prefer a small Python application with a guided command-li
 
 2. Enter the full sender email address. Optionally supply a date range and folders.
 
-3. Authenticate to the Cox address through Yahoo-compatible IMAP. Prompt for an app password securely; never save it in config, logs, or shell history.
+3. Authenticate to the Cox address through Yahoo-compatible IMAP. Read the app password from the EMAIL_ARCHIVER_APP_PASSWORD environment variable if set (the user may populate it from the macOS Keychain in ~/.zshrc); otherwise prompt securely. Never save it in config, logs, or shell history.
 
 4. List folders and perform a read-only search. Show the matching message count by year and folder.
 
@@ -135,9 +135,9 @@ Suggested output layout
 
 ● Use TLS; fail closed on certificate errors.
 
-● Prompt for the app password with terminal no-echo input. Do not accept it as a command-line argument.
+● Take the app password from EMAIL_ARCHIVER_APP_PASSWORD when set; otherwise prompt with terminal no-echo input. Do not accept it as a command-line argument or config-file value.
 
-● Do not store credentials. Use OS keychain only if a future version adds an explicit remember-me option.
+● The tool does not store credentials. Persisting the password (recommended: macOS Keychain, read into the environment variable from ~/.zshrc) is the user's choice and outside the tool.
 
 ● Never include message body, attachment contents, or password in logs or manifest.
 
@@ -187,7 +187,7 @@ Implement and deliver one phase at a time. Each phase must have a small, reviewa
 
 Phase 1 — Read-only mailbox preview
 
-Build: CLI setup, secure credential prompt, TLS IMAP connection, folder discovery, sender-address list input, folder exclusions (Spam and Trash), and a read-only search. Fetch only UIDs, RFC822.SIZE, INTERNALDATE, and the Date/From/Subject/Message-ID headers (via BODY.PEEK) needed to report match counts and sizes by folder and message year; do not fetch bodies or change mailbox state. Report searched and excluded folders, exact-match rejections, duplicates removed, and years over the size limit.
+Build: CLI setup, secure credential prompt (or environment variable), TLS IMAP connection, folder discovery, sender-address list input, folder exclusions (Spam and Trash), and a read-only search. Fetch only UIDs, RFC822.SIZE, INTERNALDATE, and the Date/From/Subject/Message-ID headers (via BODY.PEEK) needed to report match counts and sizes by folder and message year; do not fetch bodies or change mailbox state. Report searched and excluded folders, exact-match rejections, duplicates removed, and years over the size limit.
 
 User validates: The account connects; the selected folders are right; the address list and counts look correct, including boundary-year messages.
 

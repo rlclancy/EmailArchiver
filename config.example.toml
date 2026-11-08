@@ -1,5 +1,6 @@
 # Copy to ~/.config/email-archiver/config.toml (or pass --config).
-# Non-secret settings only. The app password is always prompted for
+# Non-secret settings only. The app password comes from the
+# EMAIL_ARCHIVER_APP_PASSWORD environment variable or a hidden prompt,
 # and must never be written here.
 
 [imap]
