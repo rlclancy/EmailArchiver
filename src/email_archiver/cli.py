@@ -104,6 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Fetch this exact message instead of an automatic pick; repeat for several")
     sm.add_argument("--list", action="store_true",
                     help="List every matching message with its FOLDER:UID and exit (fetches nothing)")
+
+    rd = sub.add_parser("render", help="Phase 3: render saved .eml files into one searchable PDF (offline).")
+    rd.add_argument("paths", nargs="+", type=Path, metavar="PATH",
+                    help="A sample folder from `sample`, or .eml files")
+    rd.add_argument("--output", type=Path,
+                    help="PDF to write (default: sample.pdf inside the folder, when one folder is given)")
+    rd.add_argument("--title", default="Email Archive — Sample", help="Title shown in the PDF")
+    rd.add_argument("--verbose", action="store_true", help="Show WeasyPrint warnings")
     return p
 
 
@@ -326,6 +334,52 @@ def cmd_sample(args: argparse.Namespace) -> int:
     return _with_mailbox(args, need_senders=True, body=body)
 
 
+def cmd_render(args: argparse.Namespace) -> int:
+    from .mime import load_messages  # heavy imports only for this command
+    from .render import render_pdf
+    from .report import render_render_result
+
+    if args.output is None:
+        if len(args.paths) == 1 and args.paths[0].expanduser().is_dir():
+            output = args.paths[0].expanduser() / "sample.pdf"
+        else:
+            _err("--output is required unless a single folder is given.")
+            return 2
+    else:
+        output = args.output.expanduser()
+    if output.suffix.lower() != ".pdf":
+        _err(f"Output must end in .pdf: {output}")
+        return 2
+    output = output.resolve()
+    repo = inside_git_repo(output.parent)
+    if repo is not None:
+        _err(f"{output} is inside the git repository {repo}. "
+             "Choose an output location outside any repository (mail is private).")
+        return 2
+    if not output.parent.is_dir():
+        _err(f"Folder does not exist: {output.parent}")
+        return 2
+    missing = [str(p) for p in args.paths if not p.expanduser().exists()]
+    if missing:
+        _err("Not found: " + ", ".join(missing))
+        return 2
+
+    messages, errors = load_messages(args.paths)
+    for f, why in errors:
+        _err(f"Could not read {f}: {why}")
+    if not messages:
+        _err("No .eml messages to render.")
+        return 2
+    _progress(f"Rendering {len(messages)} message(s) ...")
+    try:
+        sections = render_pdf(messages, output, args.title, verbose=args.verbose)
+    except OSError as exc:
+        _err(f"Could not write the PDF: {exc.__class__.__name__}: {exc}")
+        return 4
+    print(render_render_result(sections, output, errors))
+    return 1 if errors else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -333,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_preview(args)
         if args.command == "sample":
             return cmd_sample(args)
+        if args.command == "render":
+            return cmd_render(args)
     except KeyboardInterrupt:
         _err("\nCanceled. The mailbox is unchanged.")
         return 130

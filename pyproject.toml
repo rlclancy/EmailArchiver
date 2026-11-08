@@ -3,7 +3,11 @@ name = "email-archiver"
 version = "0.1.0"
 description = "Export all email from chosen senders in a Cox/Yahoo mailbox to local, searchable yearly PDFs."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "weasyprint==69.0",
+    "pypdf==7.0.0",
+    "nh3==0.3.7",
+]
 
 [project.scripts]
 email-archiver = "email_archiver.cli:main"

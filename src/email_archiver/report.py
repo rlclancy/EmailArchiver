@@ -180,3 +180,34 @@ def render_sample_result(outcomes, picks, run_dir) -> str:
     out.append("Mailbox unchanged: folders opened read-only (EXAMINE), messages read with "
                "BODY.PEEK, flags compared before and after.")
     return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# Phase 3
+# --------------------------------------------------------------------------
+
+def render_render_result(sections, output, errors) -> str:
+    from pypdf import PdfReader
+
+    try:
+        pages = len(PdfReader(str(output)).pages)
+    except Exception:
+        pages = None
+    out = ["", "=" * 64, "PDF RENDER (Phase 3)", "=" * 64]
+    out.append(f"Wrote:  {output}" + (f"  ({pages} pages)" if pages else ""))
+    out.append("")
+    out.append(f"  {'#':>2}  {'DATE':<17}{'BODY':<6}{'IMG':>4}{'BLOCKED':>8}{'ATT':>5}  SUBJECT")
+    for i, s in enumerate(sections, 1):
+        m = s.message
+        when = f"{m.date:%Y-%m-%d %H:%M}" if m.date else "undated"
+        out.append(f"  {i:>2}  {when:<17}{m.body_kind:<6}{s.inline_images:>4}{s.remote_images:>8}"
+                   f"{s.listed_attachments:>5}  {_truncate(m.subject, 40)}")
+    out.append("")
+    out.append("  IMG = embedded images shown; BLOCKED = remote images not loaded;")
+    out.append("  ATT = attachments listed (not yet embedded; that is Phase 4).")
+    if errors:
+        out.append("")
+        out.append(f"  {len(errors)} file(s) could not be read; see messages above.")
+    out.append("")
+    out.append("Rendered offline: no network access; HTML sanitized before rendering.")
+    return "\n".join(out)

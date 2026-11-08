@@ -8,6 +8,10 @@ channels:
 dependencies:
   - python=3.12
   - pip
-  # Phase 3+ will add: weasyprint, pango, pypdf (all on conda-forge)
+  # PDF rendering (Phase 3+). conda-forge supplies WeasyPrint's native
+  # libraries (pango, cairo, harfbuzz), so no Homebrew is needed.
+  - weasyprint=69.0
+  - pypdf=7.0.0
+  - nh3=0.3.7          # HTML sanitizer for untrusted email bodies
   - pip:
       - -e .

@@ -26,7 +26,8 @@ conda activate email-archiver
 This installs the package in editable mode, so code changes take effect without reinstalling.
 After `environment.yml` changes: `conda env update -f environment.yml --prune`.
 
-Phases 1–2 use only the Python standard library (Python 3.11+).
+PDF rendering (Phase 3+) uses WeasyPrint, pypdf and nh3, pinned in `environment.yml`.
+conda-forge supplies WeasyPrint's native libraries (pango, cairo), so Homebrew is not needed.
 
 ## Phase 1: read-only preview
 
@@ -85,6 +86,23 @@ output folder inside a git repository. Open the `.eml` files in Apple Mail to ch
 
 Each message's flags (read/unread, answered, etc.) are read before and after the
 download; any change is reported as a failure, and the message is not saved.
+
+## Phase 3: render saved messages to a PDF
+
+```sh
+# Renders every .eml in a sample folder to <folder>/sample.pdf (no network needed)
+email-archiver render ~/EmailArchive/_samples/20261108-114242
+
+# Or choose files and the output path
+email-archiver render a.eml b.eml --output ~/EmailArchive/test.pdf
+```
+
+The PDF opens with a table of contents (date, sender, subject, page). Each message starts on
+a new page with a Date/From/To/Cc/Subject header block, in chronological order. Each message's
+year comes from its own Date header and timezone. HTML is sanitized (no scripts, forms,
+`<style>` blocks or positioning) and rendered fully offline. Remote images are never fetched,
+and each message notes how many were blocked. Images embedded in the message itself are shown.
+Attachments are listed by name and size; embedding them is Phase 4.
 
 ## Tests
 
