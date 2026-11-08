@@ -13,15 +13,18 @@ docs/                 design documents
 src/email_archiver/   application package
 tests/                tests (no network needed)
 config.example.toml   sample non-secret settings
+environment.yml       conda environment
 ```
 
-## Setup
+## Setup (conda)
 
 ```sh
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+conda env create -f environment.yml
+conda activate email-archiver
 ```
+
+This installs the package in editable mode, so code changes take effect without reinstalling.
+After `environment.yml` changes: `conda env update -f environment.yml --prune`.
 
 Phase 1 uses only the Python standard library (Python 3.11+).
 
@@ -49,7 +52,8 @@ The preview never changes the mailbox: every command passes through a read-only 
 ## Tests
 
 ```sh
-PYTHONPATH=src python3 -m unittest discover -s tests
+conda activate email-archiver
+python -m unittest discover -s tests
 ```
 
 ## Privacy

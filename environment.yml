@@ -1,0 +1,13 @@
+# Conda environment for email-archiver.
+#   conda env create -f environment.yml
+#   conda activate email-archiver
+# After changing this file:  conda env update -f environment.yml --prune
+name: email-archiver
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  # Phase 3+ will add: weasyprint, pango, pypdf (all on conda-forge)
+  - pip:
+      - -e .
