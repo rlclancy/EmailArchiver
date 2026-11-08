@@ -120,3 +120,63 @@ def render_preview(result: PreviewResult, account: str, host: str) -> str:
     add("Mailbox unchanged: folders opened read-only (EXAMINE), headers read with")
     add("BODY.PEEK, no flags changed. No files were written.")
     return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# Phase 2
+# --------------------------------------------------------------------------
+
+def _when(m) -> str:
+    d = m.effective_date
+    return f"{d:%Y-%m-%d %H:%M %z}" if d else "undated"
+
+
+def render_message_list(messages) -> str:
+    """All matches with FOLDER:UID handles for --uid. Terminal only."""
+    lines = [f"{len(messages)} matching message(s). Pass any FOLDER:UID to --uid.", ""]
+    lines.append(f"  {'FOLDER:UID':<24}{'DATE':<24}{'SIZE':>9}  SUBJECT")
+    for m in messages:
+        handle = f"{m.folder}:{m.uid}"
+        lines.append(f"  {handle:<24}{_when(m):<24}{human_size(m.size):>9}  {_truncate(m.subject, 50)}")
+    return "\n".join(lines)
+
+
+def render_sample_plan(picks) -> str:
+    lines = [f"Sample to fetch ({len(picks)}):"]
+    for p in picks:
+        m = p.meta
+        lines.append(f"  {m.folder}:{m.uid:<10} {_when(m):<24}{human_size(m.size):>9}  "
+                     f"[{p.reason}]  {_truncate(m.subject, 40)}")
+    return "\n".join(lines)
+
+
+def render_sample_result(outcomes, picks, run_dir) -> str:
+    subjects = {(p.meta.folder, p.meta.uid): p.meta.subject for p in picks}
+    saved = [o for o in outcomes if o.ok]
+    failed = [o for o in outcomes if not o.ok]
+    flags_same = sum(o.flags_before is not None and o.flags_before == o.flags_after
+                     for o in outcomes)
+    out = ["", "=" * 64, "SAMPLE FETCH (Phase 2)", "=" * 64]
+    out.append(f"Saved to:  {run_dir}")
+    out.append("")
+    for o in outcomes:
+        mark = "OK  " if o.ok else "FAIL"
+        flags = " ".join(o.flags_before or []) or "(none)"
+        out.append(f"  {mark} {o.folder}:{o.uid}  {o.header_date or 'undated'}")
+        out.append(f"       subject: {_truncate(subjects.get((o.folder, o.uid), ''), 60)}")
+        if o.file:
+            out.append(f"       file:    {o.file}  ({human_size(o.bytes_written or 0)}, "
+                       f"sha256 {o.sha256[:12]}…)")
+        out.append(f"       flags:   {flags}"
+                   + ("  (unchanged)" if o.flags_before is not None and o.flags_before == o.flags_after
+                      else ""))
+        for w in o.warnings:
+            out.append(f"       note:    {w}")
+        for pr in o.problems:
+            out.append(f"       PROBLEM: {pr}")
+    out.append("")
+    out.append(f"Saved {len(saved)} of {len(outcomes)}; flags unchanged on "
+               f"{flags_same} of {len(outcomes)}; failed {len(failed)}.")
+    out.append("Mailbox unchanged: folders opened read-only (EXAMINE), messages read with "
+               "BODY.PEEK, flags compared before and after.")
+    return "\n".join(out)

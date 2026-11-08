@@ -26,7 +26,7 @@ conda activate email-archiver
 This installs the package in editable mode, so code changes take effect without reinstalling.
 After `environment.yml` changes: `conda env update -f environment.yml --prune`.
 
-Phase 1 uses only the Python standard library (Python 3.11+).
+Phases 1–2 use only the Python standard library (Python 3.11+).
 
 ## Phase 1: read-only preview
 
@@ -65,6 +65,26 @@ Optional settings can go in `~/.config/email-archiver/config.toml`; see `config.
 
 The preview never changes the mailbox: every command passes through a read-only guard
 (`safe_imap.py`) that permits only EXAMINE, LIST, UID SEARCH and peek-only UID FETCH.
+
+## Phase 2: fetch a sample of original messages
+
+```sh
+# Fetch 5 varied matches (oldest, newest, largest, smallest, a year-boundary message)
+email-archiver sample --user you@cox.net --sender person@example.com --output-dir ~/EmailArchive
+
+# List every match with its FOLDER:UID, then fetch exactly the ones you choose
+email-archiver sample --user you@cox.net --sender person@example.com --list
+email-archiver sample --user you@cox.net --sender person@example.com --output-dir ~/EmailArchive \
+  --uid Inbox:12345 --uid Inbox:12400
+```
+
+Each message is saved byte-for-byte as `.eml` in `<output-dir>/_samples/<timestamp>/`
+(folder readable only by you), with `sample-run.json` holding checksums and the
+before/after flag check. It contains no subjects, bodies or credentials. The tool refuses an
+output folder inside a git repository. Open the `.eml` files in Apple Mail to check them.
+
+Each message's flags (read/unread, answered, etc.) are read before and after the
+download; any change is reported as a failure, and the message is not saved.
 
 ## Tests
 
