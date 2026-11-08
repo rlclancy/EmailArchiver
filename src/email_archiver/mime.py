@@ -24,6 +24,8 @@ class Attachment:
     content_type: str
     size: int
     content_id: str | None = None  # set for parts an HTML body may show inline
+    data: bytes = field(default=b"", repr=False)
+    charset: str | None = None
 
 
 @dataclass
@@ -144,9 +146,13 @@ def parse_eml(raw: bytes, source: str) -> ParsedMessage:
             subj = _header(inner_msg, "Subject") if inner_msg is not None else ""
             filename = f"Attached message: {subj or '(no subject)'}"
             data = inner_msg.as_bytes() if inner_msg is not None else b""
+        try:
+            charset = part.get_content_charset()
+        except Exception:
+            charset = None
         attachments.append(Attachment(
             filename=" ".join((filename or "(unnamed)").split()),
-            content_type=ctype, size=len(data), content_id=cid,
+            content_type=ctype, size=len(data), content_id=cid, data=data, charset=charset,
         ))
 
     return ParsedMessage(

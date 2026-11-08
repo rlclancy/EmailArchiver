@@ -102,7 +102,28 @@ a new page with a Date/From/To/Cc/Subject header block, in chronological order. 
 year comes from its own Date header and timezone. HTML is sanitized (no scripts, forms,
 `<style>` blocks or positioning) and rendered fully offline. Remote images are never fetched,
 and each message notes how many were blocked. Images embedded in the message itself are shown.
-Attachments are listed by name and size; embedding them is Phase 4.
+
+## Phase 4: attachments
+
+`render` also handles attachments. Types are detected from the file contents, so a
+photo labelled `application/octet-stream` is still shown as a photo.
+
+| Attachment | In the PDF |
+|---|---|
+| JPEG, PNG, GIF, WebP images | shown after the message (animated GIFs: first frame) |
+| TIFF, BMP, HEIC photos | converted locally (Pillow / macOS `sips`) and shown |
+| PDF | its pages are drawn into the archive, numbered like the rest of the document |
+| Plain text, HTML | shown in a box; HTML is sanitized like message bodies |
+| Office files, video, audio, SVG, archives, encrypted or damaged files | saved separately; the PDF lists the name and the reason |
+
+Images that already appear inside an HTML message body are not repeated.
+Separately saved files go to `attachments/<year>/` next to the PDF (private folder).
+They keep their original name, plus a short message tag if two files share a name. Files with no
+extension get one from their detected type. `<pdf-name>-report.json` lists every
+attachment's outcome and SHA-256, with no message content.
+
+Limits: PDFs over 100 pages and images over 60 megapixels are saved instead of embedded.
+Text over 200,000 characters is shown truncated, with the full file saved.
 
 ## Tests
 

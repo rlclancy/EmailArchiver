@@ -186,28 +186,43 @@ def render_sample_result(outcomes, picks, run_dir) -> str:
 # Phase 3
 # --------------------------------------------------------------------------
 
-def render_render_result(sections, output, errors) -> str:
+def render_render_result(sections, output, errors, report=None) -> str:
     from pypdf import PdfReader
 
     try:
         pages = len(PdfReader(str(output)).pages)
     except Exception:
         pages = None
-    out = ["", "=" * 64, "PDF RENDER (Phase 3)", "=" * 64]
+    out = ["", "=" * 64, "PDF RENDER", "=" * 64]
     out.append(f"Wrote:  {output}" + (f"  ({pages} pages)" if pages else ""))
+    if report:
+        out.append(f"Report: {report}")
     out.append("")
-    out.append(f"  {'#':>2}  {'DATE':<17}{'BODY':<6}{'IMG':>4}{'BLOCKED':>8}{'ATT':>5}  SUBJECT")
+    out.append(f"  {'#':>2}  {'DATE':<17}{'BODY':<6}{'INLINE':>7}{'BLOCKED':>8}{'IMG':>5}{'PDF':>5}{'TXT':>5}{'SAVED':>7}  SUBJECT")
     for i, s in enumerate(sections, 1):
         m = s.message
         when = f"{m.date:%Y-%m-%d %H:%M}" if m.date else "undated"
-        out.append(f"  {i:>2}  {when:<17}{m.body_kind:<6}{s.inline_images:>4}{s.remote_images:>8}"
-                   f"{s.listed_attachments:>5}  {_truncate(m.subject, 40)}")
+        text = s.count("embedded-text") + s.count("embedded-html")
+        out.append(f"  {i:>2}  {when:<17}{m.body_kind:<6}{s.inline_images:>7}{s.remote_images:>8}"
+                   f"{s.count('embedded-image'):>5}{s.count('embedded-pdf'):>5}{text:>5}"
+                   f"{s.count('saved'):>7}  {_truncate(m.subject, 34)}")
     out.append("")
-    out.append("  IMG = embedded images shown; BLOCKED = remote images not loaded;")
-    out.append("  ATT = attachments listed (not yet embedded; that is Phase 4).")
+    out.append("  INLINE = images shown inside the message body; BLOCKED = remote images not loaded;")
+    out.append("  IMG/PDF/TXT = attachments embedded (TXT includes HTML); SAVED = saved separately.")
+    saved = [(i, a) for i, s in enumerate(sections, 1) for a in s.attachments
+             if a.action == "saved" or (a.saved_as and a.action != "saved")]
+    if saved:
+        out.append("")
+        out.append("Saved separately (under attachments/ next to the PDF):")
+        for i, a in saved:
+            why = a.reason or "full copy of a long text attachment"
+            out.append(f"  #{i}  {_truncate(a.filename, 38):<40}{why}")
+            if a.saved_as:
+                out.append(f"       -> {a.saved_as}")
     if errors:
         out.append("")
         out.append(f"  {len(errors)} file(s) could not be read; see messages above.")
     out.append("")
     out.append("Rendered offline: no network access; HTML sanitized before rendering.")
     return "\n".join(out)
+

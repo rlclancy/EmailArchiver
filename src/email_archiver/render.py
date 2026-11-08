@@ -10,6 +10,7 @@ Safety rules (design doc section 6):
 
 from __future__ import annotations
 
+import hashlib
 import html as htmlmod
 import logging
 import os
@@ -18,6 +19,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import nh3
 
@@ -168,6 +170,7 @@ class OfflineFetcher:
 CSS = """
 @page {
   size: letter;
+  background: #fff;  /* opaque full page (html background stops at the margins) */
   margin: 0.75in 0.7in 0.8in 0.7in;
   @top-left { content: string(doctitle); font-size: 8pt; color: #777; }
   @top-right { content: string(msgdate); font-size: 8pt; color: #777; }
@@ -229,20 +232,167 @@ def chronological(messages: list[ParsedMessage]) -> list[ParsedMessage]:
         m.folder or "", m.uid or 0, m.source))
 
 
+# Page geometry (points). Must agree with the @page margins in CSS.
+PAGE_W, PAGE_H = 612.0, 792.0                     # US Letter
+MARGIN_TOP, MARGIN_RIGHT, MARGIN_BOTTOM, MARGIN_LEFT = 54.0, 50.4, 57.6, 50.4
+PDF_CAPTION_H = 18.0
+# Area of a placeholder page that an attachment page is drawn into.
+PDF_BOX = (MARGIN_LEFT, MARGIN_BOTTOM, PAGE_W - MARGIN_RIGHT, PAGE_H - MARGIN_TOP - PDF_CAPTION_H)
+
+ATTACHMENT_CSS = """
+.atts h3.atthead { font-size: 10pt; margin: 14pt 0 6pt; border-top: 1px solid #ccc; padding-top: 6pt; }
+figure.attimg { margin: 8pt 0 12pt; break-inside: avoid; text-align: center; }
+figure.attimg img { max-width: 100%; max-height: 8.4in; }
+figure.attimg figcaption, .attcap { font-size: 8.5pt; color: #555; margin-top: 3pt; }
+.atttext { border: 1px solid #ddd; padding: 6pt 8pt; margin: 6pt 0 12pt; font-size: 9pt; }
+.atthtml { border: 1px solid #ddd; padding: 6pt 8pt; margin: 6pt 0 12pt; }
+.pdfintro { margin: 8pt 0; font-size: 9.5pt; }
+div.pdfpage { break-before: page; break-after: page; height: 640pt; }
+div.pdfpage .pdfcap { font-size: 8pt; color: #777; height: 14pt; }
+.saved li { margin-bottom: 2pt; }
+.saved .why { color: #7a5b12; }
+.saved .path { color: #777; font-family: Menlo, monospace; font-size: 8pt; }
+a.file { color: #1f5fbf; text-decoration: underline; }
+"""
+
+
+@dataclass
+class AttachmentRecord:
+    """Per-attachment outcome; written to render-report.json (no message content)."""
+    filename: str
+    declared_type: str
+    detected_type: str | None
+    size: int
+    sha256: str
+    action: str                 # embedded-image | embedded-pdf | embedded-text | embedded-html | saved | skipped
+    saved_as: str | None = None  # relative to the PDF's folder
+    reason: str | None = None
+    notes: list[str] = field(default_factory=list)
+
+
 @dataclass
 class RenderedSection:
     message: ParsedMessage
     remote_images: int = 0
     inline_images: int = 0
-    listed_attachments: int = 0
+    attachments: list[AttachmentRecord] = field(default_factory=list)
+
+    @property
+    def listed_attachments(self) -> int:
+        return len(self.attachments)
+
+    def count(self, action: str) -> int:
+        return sum(a.action == action for a in self.attachments)
 
 
-def _message_html(i: int, m: ParsedMessage, images: InlineImages) -> tuple[str, RenderedSection]:
+@dataclass
+class _Assembly:
+    images: InlineImages = field(default_factory=InlineImages)
+    pdf_jobs: list[tuple[str, bytes, int]] = field(default_factory=list)  # (anchor id, pdf, page)
+    save_root: Path | None = None
+
+
+def _msg_key(m: ParsedMessage) -> str:
+    return f"{m.folder}:{m.uid}" if m.uid is not None else m.source
+
+
+def file_link(rel_path: str) -> str:
+    """Clickable link to a saved file, relative to the PDF's folder.
+
+    Relative links keep working when the whole archive folder is moved. The
+    path is percent-encoded (spaces, accents, apostrophes) as URIs require.
+    """
+    e = htmlmod.escape
+    return f'<a class="file" href="{e(quote(rel_path))}">{e(rel_path)}</a>'
+
+
+def _attachment_html(i: int, m: ParsedMessage, atts, asm: _Assembly,
+                     sec: RenderedSection) -> str:
+    from .attachments import plan_attachment, save_attachment
+
+    e = htmlmod.escape
+    shown, saved = [], []
+    for k, a in enumerate(atts, 1):
+        rec = AttachmentRecord(filename=a.filename, declared_type=a.content_type, detected_type=None,
+                               size=a.size, sha256=hashlib.sha256(a.data).hexdigest(), action="saved")
+        try:
+            plan = plan_attachment(a.filename, a.content_type, a.data, a.charset)
+        except Exception as exc:  # never let one attachment stop the render
+            from .attachments import Plan
+            plan = Plan("save", f"could not be processed ({exc.__class__.__name__})")
+        rec.detected_type, rec.notes = plan.detected, list(plan.notes)
+        cap = (f"{e(a.filename)} ({e(plan.detected or a.content_type)}, {_human(a.size)})"
+               + "".join(f" — {e(n)}" for n in plan.notes))
+
+        # Save first, so the PDF can link to the saved copy.
+        link = ""
+        if plan.action == "save" or plan.also_save:
+            if plan.action == "save":
+                rec.reason = plan.reason
+            if asm.save_root is not None:
+                default_ext = ".eml" if a.content_type == "message/rfc822" else plan.suggested_ext
+                path = save_attachment(asm.save_root, m.year, a.filename, a.data, _msg_key(m),
+                                       default_ext)
+                rec.saved_as = path.relative_to(asm.save_root).as_posix()
+                link = file_link(rec.saved_as)
+
+        if plan.action == "image":
+            token = asm.images.add(plan.image_type, plan.image_bytes)
+            shown.append(f'<figure class="attimg"><img src="{token}" alt="{e(a.filename)}">'
+                         f"<figcaption>Attachment: {cap}</figcaption></figure>")
+            rec.action = "embedded-image"
+        elif plan.action == "pdf":
+            anchor = f"pdf-{i}-{k}"
+            pages = "".join(
+                f'<div class="pdfpage" id="{anchor}-{j}"><div class="pdfcap">Attachment: '
+                f"{e(a.filename)} — page {j + 1} of {plan.pdf_pages}</div></div>"
+                for j in range(plan.pdf_pages))
+            shown.append(f'<p class="pdfintro">PDF attachment: {cap} — {plan.pdf_pages} page(s) follow.</p>'
+                         + pages)
+            asm.pdf_jobs += [(f"{anchor}-{j}", a.data, j) for j in range(plan.pdf_pages)]
+            rec.action = "embedded-pdf"
+        elif plan.action == "text":
+            full = f" — full file: {link}" if link else ""
+            shown.append(f'<div class="attcap">Attachment: {cap}{full}</div>'
+                         f'<div class="atttext">{text_to_html(plan.text)}</div>')
+            rec.action = "embedded-text"
+        elif plan.action == "html":
+            body, stats = sanitize_html(plan.text, {}, asm.images)
+            extra = (f" — {stats.remote_images} remote image(s) not loaded" if stats.remote_images else "")
+            shown.append(f'<div class="attcap">Attachment: {cap}{extra}</div>'
+                         f'<div class="atthtml body">{body}</div>')
+            rec.action = "embedded-html"
+        elif plan.action == "skip":
+            rec.action, rec.reason = "skipped", plan.reason
+
+        if plan.action == "save":
+            name = (f'<a class="file" href="{e(quote(rec.saved_as))}">{e(a.filename)}</a>'
+                    if rec.saved_as else e(a.filename))
+            where = f'<br><span class="path">saved as {link}</span>' if link else ""
+            saved.append(f"<li>{name} ({e(plan.detected or a.content_type)}, "
+                         f"{_human(a.size)}) — <span class='why'>{e(plan.reason)}</span>{where}</li>")
+        sec.attachments.append(rec)
+
+    if not shown and not saved:
+        return ""
+    out = ['<div class="atts">']
+    if shown:
+        out.append(f'<h3 class="atthead">Attachments shown below ({len(shown)})</h3>')
+        out += shown
+    if saved:
+        # A PDF placeholder ends with a page break, so this box starts cleanly after it.
+        out.append(f'<div class="box saved"><h3>Saved separately ({len(saved)})</h3><ul>'
+                   + "".join(saved) + "</ul></div>")
+    out.append("</div>")
+    return "".join(out)
+
+
+def _message_html(i: int, m: ParsedMessage, asm: _Assembly) -> tuple[str, RenderedSection]:
     e = htmlmod.escape
     sec = RenderedSection(m)
     notes = list(m.notes)
     if m.body_kind == "html":
-        body, stats = sanitize_html(m.body, m.inline_parts, images)
+        body, stats = sanitize_html(m.body, m.inline_parts, asm.images)
         sec.remote_images, sec.inline_images = stats.remote_images, stats.inline_images
         if stats.remote_images:
             notes.append(f"{stats.remote_images} remote image(s) were not loaded "
@@ -269,14 +419,9 @@ def _message_html(i: int, m: ParsedMessage, images: InlineImages) -> tuple[str, 
     hdr = "".join(f"<tr><th>{e(k)}</th><td{' class=date' if k == 'Date' else ''}>{e(v)}</td></tr>"
                   for k, v in rows)
 
+    # Images already shown inside the HTML body are not repeated as attachments.
     atts = [a for a in m.attachments if not (a.content_id and a.content_id in used)]
-    sec.listed_attachments = len(atts)
-    att_html = ""
-    if atts:
-        items = "".join(f"<li>{e(a.filename)} <span style='color:#777'>({e(a.content_type)}, "
-                        f"{_human(a.size)})</span></li>" for a in atts)
-        att_html = (f'<div class="box"><h3>Attachments ({len(atts)}) — not yet included in this PDF</h3>'
-                    f"<ul>{items}</ul></div>")
+    att_html = _attachment_html(i, m, atts, asm, sec)
     notes_html = ""
     if notes:
         notes_html = ('<div class="box notes"><h3>Notes</h3><ul>'
@@ -289,14 +434,16 @@ def _message_html(i: int, m: ParsedMessage, images: InlineImages) -> tuple[str, 
     return html, sec
 
 
-def build_document(messages: list[ParsedMessage], title: str,
-                   generated: datetime | None = None) -> tuple[str, InlineImages, list[RenderedSection]]:
+def build_document(messages: list[ParsedMessage], title: str, save_root: Path | None = None,
+                   generated: datetime | None = None) -> tuple[str, _Assembly, list[RenderedSection]]:
+    """Assemble the HTML. With ``save_root``, unsupported attachments are saved
+    under save_root/attachments/<year>/; without it they are only listed."""
     e = htmlmod.escape
     ordered = chronological(messages)
-    images = InlineImages()
+    asm = _Assembly(save_root=save_root)
     parts, sections = [], []
     for i, m in enumerate(ordered, 1):
-        html, sec = _message_html(i, m, images)
+        html, sec = _message_html(i, m, asm)
         parts.append(html)
         sections.append(sec)
 
@@ -311,7 +458,7 @@ def build_document(messages: list[ParsedMessage], title: str,
         for i, m in enumerate(ordered, 1))
     doc = (
         "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<title>{e(title)}</title><style>{CSS}</style></head><body>"
+        f"<title>{e(title)}</title><style>{CSS}{ATTACHMENT_CSS}</style></head><body>"
         f'<h1 class="doctitle">{e(title)}</h1>'
         f'<p class="meta">{len(ordered)} message(s), {e(span)}. Generated {e(gen)}. '
         "Messages are in chronological order; each starts on a new page.</p>"
@@ -319,24 +466,45 @@ def build_document(messages: list[ParsedMessage], title: str,
         f"<th>Page</th></tr></thead><tbody>{toc_rows}</tbody></table>"
         + "".join(parts) + "</body></html>"
     )
-    return doc, images, sections
+    return doc, asm, sections
 
 
 def render_pdf(messages: list[ParsedMessage], output: Path, title: str,
                verbose: bool = False) -> list[RenderedSection]:
-    """Render to ``output`` atomically (temp file + rename, mode 0600)."""
+    """Render to ``output`` atomically (temp file + rename, mode 0600).
+
+    PDF attachments are drawn into placeholder pages after rendering, so page
+    numbers and the table of contents already account for them.
+    """
     import weasyprint
 
+    from .attachments import merge_pdf_pages
+
     if not verbose:
-        logging.getLogger("weasyprint").setLevel(logging.ERROR)
-        logging.getLogger("fontTools").setLevel(logging.ERROR)
-    doc, images, sections = build_document(messages, title)
-    fetcher = OfflineFetcher(images)
+        for name in ("weasyprint", "fontTools", "pypdf"):
+            logging.getLogger(name).setLevel(logging.ERROR)
     output = output.resolve()
+    doc, asm, sections = build_document(messages, title, save_root=output.parent)
+    fetcher = OfflineFetcher(asm.images)
+    document = weasyprint.HTML(string=doc, base_url=None, url_fetcher=fetcher).render()
+
+    pdf_bytes = document.write_pdf()
+    if asm.pdf_jobs:
+        where = {}
+        for index, page in enumerate(document.pages):
+            for anchor in page.anchors:
+                where.setdefault(anchor, index)
+        jobs = []
+        for anchor, data, page_no in asm.pdf_jobs:
+            if anchor not in where:
+                raise RuntimeError(f"internal error: placeholder {anchor} was not laid out")
+            jobs.append((where[anchor], data, page_no))
+        pdf_bytes = merge_pdf_pages(pdf_bytes, jobs, PDF_BOX)
+
     fd, tmp = tempfile.mkstemp(dir=output.parent, prefix=".partial-", suffix=".pdf")
-    os.close(fd)
     try:
-        weasyprint.HTML(string=doc, base_url=None, url_fetcher=fetcher).write_pdf(tmp)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(pdf_bytes)
         os.chmod(tmp, 0o600)
         os.replace(tmp, output)
     except BaseException:
@@ -346,3 +514,28 @@ def render_pdf(messages: list[ParsedMessage], output: Path, title: str,
             pass
         raise
     return sections
+
+
+def write_render_report(output: Path, sections: list[RenderedSection]) -> Path:
+    """render-report.json beside the PDF: attachment outcomes, no message content."""
+    import json
+    from dataclasses import asdict
+
+    doc = {
+        "pdf": output.name,
+        "generated_utc": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "messages": [{
+            "source": s.message.source, "folder": s.message.folder, "uid": s.message.uid,
+            "year": s.message.year, "remote_images_blocked": s.remote_images,
+            "inline_images_shown": s.inline_images,
+            "attachments": [asdict(a) for a in s.attachments],
+        } for s in sections],
+    }
+    path = output.parent / (output.stem + "-report.json")
+    fd, tmp = tempfile.mkstemp(dir=output.parent, prefix=".partial-")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return path

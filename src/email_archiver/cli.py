@@ -336,7 +336,7 @@ def cmd_sample(args: argparse.Namespace) -> int:
 
 def cmd_render(args: argparse.Namespace) -> int:
     from .mime import load_messages  # heavy imports only for this command
-    from .render import render_pdf
+    from .render import render_pdf, write_render_report
     from .report import render_render_result
 
     if args.output is None:
@@ -376,7 +376,8 @@ def cmd_render(args: argparse.Namespace) -> int:
     except OSError as exc:
         _err(f"Could not write the PDF: {exc.__class__.__name__}: {exc}")
         return 4
-    print(render_render_result(sections, output, errors))
+    report = write_render_report(output, sections)
+    print(render_render_result(sections, output, errors, report))
     return 1 if errors else 0
 
 
