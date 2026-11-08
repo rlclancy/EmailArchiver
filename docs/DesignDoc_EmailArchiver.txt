@@ -1,6 +1,6 @@
 Cox Mail Sender Archive to Yearly PDFs — Agent Design
 
-Status: Draft for implementation; initial user choices recorded
+Status: Draft for implementation; user choices and design review incorporated (rev. 2026-11-08)
 Date: 2026-11-08
 Owner: Ray
 Purpose: Export every email from one chosen sender in a Cox @cox.net mailbox into local, searchable PDFs, split by calendar year.
@@ -35,7 +35,7 @@ The user is on macOS. Prefer a small Python application with a guided command-li
 
 ● Reproducing the exact visual layout of every email client.
 
-● Embedding binary attachments inside the PDF.
+● Embedding attachment types other than PDFs, common raster images, plain text, and HTML (for example Office documents, archives, audio/video). These are saved separately and listed in the email section; see Attachments.
 
 ● OCR for image-only attachments.
 
@@ -65,11 +65,17 @@ Components
 
 ● IMAP connector: TLS connection to Yahoo’s IMAP endpoint using the current Cox/Yahoo settings. Use the provider’s supported app-password flow. Discover/validate current settings at implementation time; do not assume generic Yahoo settings are identical to Cox-transition settings.
 
-● Message retrieval: Use IMAP UID-based searches and fetches. Open mailboxes read-only where supported. Search sender on the server where practical, then verify the normalized sender address locally to avoid false positives. Fetch original RFC 822 content.
+● Folder selection: Identify Spam and Trash by IMAP SPECIAL-USE attributes (\Junk, \Trash). If the server does not advertise them, fall back to case-insensitive name matching (Bulk, Bulk Mail, Spam, Junk, Trash, Deleted, Deleted Items). The preview lists every folder searched and every folder excluded, with the reason. A --folders flag overrides automatic selection.
+
+● Message retrieval: Use IMAP UID-based searches and fetches. Open every mailbox with EXAMINE (read-only), never SELECT. Fetch content only with BODY.PEEK[] (and header-only BODY.PEEK[HEADER.FIELDS (...)] in Phase 1); never use RFC822 or BODY[] fetches, which can set \Seen. Never issue STORE, COPY, MOVE, APPEND, or EXPUNGE.
+
+● Sender matching: Use server-side SEARCH FROM only as a coarse pre-filter; Yahoo treats it as a substring match on the From header. Accept a message only if the parsed From address (addr-spec, compared case-insensitively) exactly equals one of the configured sender addresses. The preview reports how many server hits were rejected by exact matching.
+
+● Duplicate handling: The same message can appear in more than one folder. Deduplicate by normalized Message-ID; when Message-ID is absent, use a SHA-256 hash of the raw message bytes (computed at fetch time; in Phase 1, use a provisional key of Date + From + Subject + RFC822.SIZE). Keep the first occurrence by folder order then UID, and record the other folders in that message's PDF header and in the manifest. Preview counts are reported after deduplication, with the number of duplicates shown separately.
 
 ● MIME parser: Python standard-library email package. Decode headers and multipart alternatives robustly. Prefer HTML body when available; fall back to plain text. Strip tracking pixels and block all remote resources. Sanitize untrusted HTML before rendering.
 
-● PDF renderer: Render sanitized HTML or clean text into a searchable PDF with one message per section and a page break between messages. Use an actively maintained local renderer; pin dependencies and document macOS installation. Do not execute scripts or load remote fonts/images/styles.
+● PDF renderer: Use WeasyPrint to render sanitized HTML or clean text into a searchable PDF with one message per section and a page break between messages. WeasyPrint does not execute JavaScript; supply a custom url_fetcher that refuses all network URLs, so no remote fonts, images, or styles are loaded. Use pypdf to merge embedded PDF attachments into the output. Build the table of contents in a second pass after merging, so page numbers reflect the final document. Pin dependency versions and document macOS installation (brew install pango, then pip install).
 
 ● Output manager: Write to a temporary file, then atomically rename when complete. Generate deterministic filenames such as Cox-Sender-Archive-2023.pdf; avoid sender names in paths by default.
 
@@ -83,7 +89,7 @@ Message organization and date rules
 
 ● User choice: use each message’s own Date header and its stated timezone to assign the calendar year; do not convert to the Mac’s local timezone first.
 
-● Sort messages chronologically within each yearly PDF, oldest first; use stable UID as a tie-breaker.
+● Sort messages within each yearly PDF by absolute time (the Date header converted to UTC), oldest first; break ties by folder name then UID. The year itself is still chosen from the header's own stated timezone, as above.
 
 ● Include a visible divider/header for each email so adjacent messages cannot be confused.
 
@@ -119,6 +125,10 @@ Suggested output layout
 
   export-manifest.json         # optional; no credentials or bodies
 
+  _samples/                    # Phase 2-4 sample output only; safe to delete
+
+    <timestamp>/
+
 6. Privacy and operational requirements
 
 ● All PDF rendering and file writing happen locally.
@@ -131,7 +141,7 @@ Suggested output layout
 
 ● Never include message body, attachment contents, or password in logs or manifest.
 
-● Do not mark messages read: use read-only IMAP mailbox selection and avoid commands that alter flags.
+● Do not mark messages read: open mailboxes with EXAMINE, fetch only with BODY.PEEK, and never issue STORE, COPY, MOVE, APPEND, or EXPUNGE.
 
 ● Validate output filenames and prevent path traversal.
 
@@ -145,13 +155,13 @@ Suggested output layout
 
 ● Handle transient disconnects with retry and exponential backoff, respecting provider limits.
 
-● Keep a local checkpoint of completed message identifiers so an interrupted run can resume without duplicating completed entries.
+● Keep a local checkpoint of completed messages so an interrupted run can resume without duplicating completed entries. Identify each message by (folder, UIDVALIDITY, UID). On resume, compare each folder's current UIDVALIDITY with the checkpoint; if it changed, stop and offer to re-run the preview for that folder rather than guess.
 
 ● Validate that every message found in preview is either rendered or listed as failed in the run report.
 
 ● Avoid building one unbounded in-memory HTML document. Render a year at a time, with configurable message/page limits if necessary.
 
-● For very large years, allow splitting into parts (for example, 2023-part-01.pdf) only if the user approves that behavior.
+● Large years: Phase 1 fetches RFC822.SIZE (no bodies) and the preview shows message count and total size per year. A year exceeding a configurable limit (default 1,500 messages or 200 MB) is flagged, and the user chooses once, before rendering, to keep a single PDF or split it. Splits fall on calendar-month boundaries (for example, Cox-Sender-Archive-2023-part-01.pdf covering January-April), so each part is a contiguous date range and no message is divided. The choice is recorded in the manifest and reused on resume.
 
 8. Error handling
 
@@ -160,6 +170,8 @@ Suggested output layout
 ● Network failure: preserve completed outputs and checkpoint, then offer resume.
 
 ● Missing/invalid message date: use INTERNALDATE fallback and report it.
+
+● Folder UIDVALIDITY changed between runs: stop that folder's resume and offer to re-run the preview; do not reuse stale UIDs.
 
 ● Unsupported or malformed MIME part: preserve decoded text where possible and add a visible note.
 
@@ -175,7 +187,7 @@ Implement and deliver one phase at a time. Each phase must have a small, reviewa
 
 Phase 1 — Read-only mailbox preview
 
-Build: CLI setup, secure credential prompt, TLS IMAP connection, folder discovery, sender-address list input, folder exclusions (Spam and Trash), and a read-only search. Fetch only message identifiers and date/sender headers needed to report match counts by folder and message year; do not fetch bodies or change mailbox state.
+Build: CLI setup, secure credential prompt, TLS IMAP connection, folder discovery, sender-address list input, folder exclusions (Spam and Trash), and a read-only search. Fetch only UIDs, RFC822.SIZE, INTERNALDATE, and the Date/From/Subject/Message-ID headers (via BODY.PEEK) needed to report match counts and sizes by folder and message year; do not fetch bodies or change mailbox state. Report searched and excluded folders, exact-match rejections, duplicates removed, and years over the size limit.
 
 User validates: The account connects; the selected folders are right; the address list and counts look correct, including boundary-year messages.
 
@@ -183,7 +195,7 @@ Exit checkpoint: User confirms the preview results before Phase 2. A failed or c
 
 Phase 2 — Fetch and retain original messages
 
-Build: Fetch a small, user-selected sample (default 3–5 messages) by stable IMAP UID, save byte-faithful .eml files into a temporary sample output, and record only non-sensitive run metadata. Preserve the selected messages’ flags/read state.
+Build: Fetch a small, user-selected sample (default 3–5 messages) by stable IMAP UID, save byte-faithful .eml files under <output-dir>/_samples/<timestamp>/, and record only non-sensitive run metadata. Preserve the selected messages’ flags/read state: fetch each message's FLAGS before and after retrieval and report any difference as a failure.
 
 User validates: The sample .eml files open in a local mail app and correspond to the expected messages; sender, date, and body are intact; the source messages remain unchanged/read state is preserved.
 
@@ -225,15 +237,13 @@ Exit checkpoint: User confirms the limited-run reconciliation before the full ma
 
 5. Plain-text-only and HTML-only messages render; multipart messages select a sensible body alternative.
 
-6. Attachments are either listed or saved separately according to the selected setting.
+6. The tool never changes mailbox message state or contents.
 
-7. The tool never changes mailbox message state or contents.
+7. An interrupted export can resume without silently omitting or duplicating messages.
 
-8. An interrupted export can resume without silently omitting or duplicating messages.
+8. Credentials and message bodies do not appear in logs or the manifest.
 
-9. Credentials and message bodies do not appear in logs or the manifest.
-
-10. A small sample export can be visually reviewed before exporting the full archive.
+9. A small sample export can be visually reviewed before exporting the full archive.
 
 11. Clarifications needed before implementation
 
@@ -245,8 +255,8 @@ Defaults below are proposed so implementation can proceed if the user accepts th
 |2. Which folders should be searched?                                                                           |**Answered:** All folders except Spam and Trash.                                                                                                      |
 |3. Which timezone defines the calendar year?                                                                   |**Answered:** Use the message’s Date header and its stated timezone; do not convert to the Mac’s local timezone before grouping.                      |
 |4. How should attachments be handled?                                                                          |**Answered:** Embed PDFs, common images, plain text, and HTML where safe; save other or unconvertible attachments separately and note them in the PDF.|
-|5. Should messages be grouped individually or by conversation/thread?                                          |Each message separately, including replies from the sender; no thread collapsing.                                                                     |
+|5. Should messages be grouped individually or by conversation/thread?                                          |**Answered:** Each message separately, in chronological order, including replies; no thread grouping (threads cross year boundaries). Quoted reply text is kept unmodified.|
 |6. Should the exporter include the message body in the manifest or retain raw `.eml` files?                    |**Answered:** Do not include bodies in the manifest; retain original `.eml` copies locally, grouped by year.                                          |
-|7. Is one PDF per year acceptable for extremely large years?                                                   |Yes, with a configurable size/page limit and a prompt to split a year into parts.                                                                     |
-|8. Do you want a graphical interface, or is a terminal tool acceptable?                                        |Terminal tool.                                                                                                                                        |
+|7. Is one PDF per year acceptable for extremely large years?                                                   |**Answered:** One PDF per year by default. The preview flags years over a configurable limit (default 1,500 messages or 200 MB); the user chooses to keep or split by calendar month.|
+|8. Do you want a graphical interface, or is a terminal tool acceptable?                                        |**Answered:** Terminal tool.                                                                                                                           |
 
